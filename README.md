@@ -7,6 +7,7 @@
 Environment variables:
 
 | Name | Description |
+| --- | --- |
 | `SYNCTHING_MERGE_URL` | The URL at which Syncthing is accessible |
 | `SYNCTHING_MERGE_API_KEY` | The Syncthing instance's API key |
 | `SYNCTHING_MERGE_FOLDER_ID` | ID of the Syncthing folder to monitor |
