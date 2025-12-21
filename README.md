@@ -4,7 +4,7 @@
 
 ## Usage
 
-Environment variables:
+Run with the following environment variables set:
 
 | Name | Description |
 | --- | --- |
