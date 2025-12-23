@@ -1,4 +1,10 @@
 cradle:
   cabal:
-    - path: "app/Main.hs"
-      component: "syncthing-merge:exe:tsk-syncthing"
+    - path: "./syncthing-merge/app/Main.hs"
+      component: "syncthing-merge:exe:syncthing-merge"
+
+    - path: "./syncthing-merge/app/Secret.hs"
+      component: "syncthing-merge:exe:syncthing-merge"
+
+    - path: "./syncthing-merge/app/Toml.hs"
+      component: "syncthing-merge:exe:syncthing-merge"

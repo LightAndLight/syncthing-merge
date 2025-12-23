@@ -1,3 +1,0 @@
-#! /usr/bin/env bash
-export SYNCTHING_MERGE_PROGRAM="$(dirname $(realpath "$0"))/merge"
-cabal run .

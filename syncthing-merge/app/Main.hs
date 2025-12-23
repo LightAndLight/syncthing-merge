@@ -16,33 +16,39 @@ import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.DeepSeq (rnf)
 import Control.Exception (evaluate, tryJust)
-import Control.Monad (when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Writer (MonadWriter, execWriterT, tell)
 import Data.Aeson (FromJSON, (.:))
 import qualified Data.Aeson as Json
 import qualified Data.Aeson.Types as Json (Parser)
 import Data.ByteString (ByteString)
+import qualified Data.ByteString as ByteString
+import qualified Data.ByteString.Char8 as ByteString.Char8
+import qualified Data.ByteString.Lazy as LazyByteString
+import qualified Data.ByteString.Lazy.Char8 as LazyByteString.Char8
 import Data.Foldable (for_, traverse_)
-import Data.List (sortOn, unsnoc)
+import Data.List (find, sortOn, unsnoc)
 import Data.Maybe (isJust)
 import Data.Ord (Down (..))
 import Data.Semigroup (Max (..))
 import Data.String (fromString)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as Text.Encoding
 import Data.Time.Clock (UTCTime)
 import GHC.Generics (Generic)
 import Network.HTTP.Client (httpLbs)
 import qualified Network.HTTP.Client as Http
 import Network.HTTP.Types.Status (ok200)
+import qualified Options.Applicative as Options
+import qualified Secret
 import System.Directory (doesFileExist)
-import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..), exitFailure, exitWith)
 import System.FilePath ((</>))
-import System.IO (hClose, hGetContents, hPutStrLn, stderr)
+import System.IO (hClose, hGetContents, hPutStrLn, stderr, hSetBuffering, BufferMode (..), stdout)
 import System.Process (CreateProcess (..), StdStream (..), proc, waitForProcess, withCreateProcess)
+import qualified Text.Diagnostic as Diagnostic
+import qualified Text.Diagnostic.Sage as Diagnostic.Sage
+import qualified Toml
 import Prelude hiding (break)
 
 data SyncthingPaths
@@ -74,15 +80,27 @@ data Config
   = Config
   { syncthingUrl :: !Text
   -- ^ URL (including port, if necessary) at which Syncthing is accessible
-  , syncthingApiKey :: !ByteString
-  -- ^ Syncthing API key
-  , syncthingFolderId :: !Text
+  , syncthingApiKeyFile :: !FilePath
+  -- ^ File containing Syncthing API key
+  , mergeTargets :: [MergeTarget]
+  }
+  deriving (Show)
+
+data MergeTarget
+  = MergeTarget
+  { folderId :: !Text
   -- ^ ID of the Syncthing folder in which the @tsk@ database resides
-  , syncthingFolder :: !Text
+  , folderName :: !Text
   -- ^ Name of the Syncthing folder in which the @tsk@ database resides
-  , syncthingFile :: !Text
+  , files :: ![MergeTargetFile]
+  }
+  deriving (Show)
+
+data MergeTargetFile
+  = MergeTargetFile
+  { name :: !Text
   -- ^ Name of the synced file
-  , mergeProgram :: !FilePath
+  , program :: !FilePath
   -- ^ Path to the executable responsible for merging
   --
   -- First program argument is the original file, second argument is the conflicting version.
@@ -92,29 +110,69 @@ data Config
   -- changes from the original file on top. After that, the program should clean up by renaming
   -- the updated conflicting file to the original file.
   }
+  deriving (Show)
 
-loadConfig :: MonadIO m => m Config
-loadConfig =
+loadConfig :: MonadIO m => FilePath -> m Config
+loadConfig path = do
+  result <- liftIO $ Toml.load path configDecoder
+  case result of
+    Right a -> pure $! a
+    Left err -> do
+      let
+        report =
+          case err of
+            Toml.ParseError parseError -> Diagnostic.Sage.parseError parseError
+            Toml.MissingKey offset name ->
+              Diagnostic.emit
+                (Diagnostic.Offset offset)
+                Diagnostic.Caret
+                (fromString $ "missing key: " ++ Text.unpack name)
+            Toml.UnexpectedEntries keys entries ->
+              foldMap
+                ( \(Toml.TomlKeyEntry nameOffset _value) ->
+                    Diagnostic.emit
+                      (Diagnostic.Offset nameOffset)
+                      Diagnostic.Caret
+                      (fromString "unexpected key")
+                )
+                keys
+                <> foldMap
+                  ( \entry ->
+                      Diagnostic.emit
+                        (Diagnostic.Offset $ Toml.locatedOffset entry)
+                        Diagnostic.Caret
+                        (fromString "unexpected section")
+                  )
+                  entries
+            Toml.ExpectedString offset ->
+              Diagnostic.emit
+                (Diagnostic.Offset offset)
+                Diagnostic.Caret
+                (fromString "unexpected string")
+
+      liftIO $ do
+        contents <- LazyByteString.readFile path
+        LazyByteString.Char8.putStrLn $
+          Diagnostic.render Diagnostic.defaultConfig (fromString path) contents report
+        exitFailure
+
+configDecoder :: Toml.Decoder Config
+configDecoder =
   Config
-    <$> required "SYNCTHING_MERGE_URL" text
-    <*> required "SYNCTHING_MERGE_API_KEY" byteString
-    <*> required "SYNCTHING_MERGE_FOLDER_ID" text
-    <*> required "SYNCTHING_MERGE_FOLDER_NAME" text
-    <*> required "SYNCTHING_MERGE_FILE_NAME" text
-    <*> required "SYNCTHING_MERGE_PROGRAM" filepath
-  where
-    required :: MonadIO m => String -> (String -> a) -> m a
-    required key decoder = do
-      mValue <- liftIO $ lookupEnv key
-      case mValue of
-        Nothing -> do
-          logError $ "missing required environment variable: " ++ key
-          liftIO exitFailure
-        Just value -> pure $! decoder value
-
-    text = Text.pack
-    filepath = id
-    byteString = Text.Encoding.encodeUtf8 . Text.pack
+    <$> Toml.key (fromString "syncthing-url") Toml.text
+    <*> Toml.key (fromString "syncthing-api-key-file") Toml.string
+    <*> Toml.tableArray
+      (fromString "merge-target")
+      ( MergeTarget
+          <$> Toml.key (fromString "folder-id") Toml.text
+          <*> Toml.key (fromString "folder-name") Toml.text
+          <*> Toml.tableArray
+            (fromString "file")
+            ( MergeTargetFile
+                <$> Toml.key (fromString "name") Toml.text
+                <*> Toml.key (fromString "program") Toml.string
+            )
+      )
 
 data SyncthingEvent a
   = SyncthingEvent
@@ -147,7 +205,7 @@ data LocalIndexUpdated
   , items :: !Int
   , sequence :: !Int
   , version :: !Int
-  }
+  } deriving Show
 
 instance FromSyncthingEvent LocalIndexUpdated where
   parseSyncthingEvent type_
@@ -216,9 +274,7 @@ handleConflicts ::
   SyncthingEvent LocalIndexUpdated ->
   m ()
 handleConflicts config syncthingRoot event
-  | event.payload.folder == config.syncthingFolderId =
-      -- The conflicting files are all older than the original.
-      --
+  | Just mergeTarget <- find ((event.payload.folder ==) . (.folderId)) config.mergeTargets = do
       -- Merge the original file (newest) onto the newest conflicting file. The result of that
       -- is renamed to the original file. Then merge *that* original file onto the second-oldest
       -- conflicting file, and *that* is renamed to the original file. And so on.
@@ -226,61 +282,71 @@ handleConflicts config syncthingRoot event
       -- It's very likely that only a single conflicting file will be created. But this seems like
       -- the right way to merge multiple conflicts. Essentially a `foldl` back in time.
       for_ (sortOn Down event.payload.filenames) $ \filename ->
-        when (filename `conflictsWith` config.syncthingFile) $ do
-          let directory = Text.unpack syncthingRoot </> Text.unpack config.syncthingFolder
-          let originalFile = directory </> Text.unpack config.syncthingFile
-          let conflictFile = directory </> Text.unpack filename
-          exists <- liftIO $ doesFileExist conflictFile
+        for_ (find ((filename `conflictsWith`) . (.name)) mergeTarget.files) $ \mergeTargetFile -> do
+            let directory = Text.unpack syncthingRoot </> Text.unpack mergeTarget.folderName
+            let originalFile = directory </> Text.unpack mergeTargetFile.name
+            let conflictFile = directory </> Text.unpack filename
+            exists <- liftIO $ doesFileExist conflictFile
 
-          if exists
-            then do
-              let program = config.mergeProgram
-              let args = [originalFile, conflictFile]
-              let process = (proc program args){std_in = Inherit, std_out = CreatePipe, std_err = CreatePipe}
-              (exitCode, out, err) <-
-                liftIO . withCreateProcess process $ \_mStdin mStdout mStderr processHandle ->
-                  case (mStdout, mStderr) of
-                    (Just hStdout, Just hStderr) -> do
-                      out <- hGetContents hStdout
-                      err <- hGetContents hStderr
+            if exists
+              then do
+                let program = mergeTargetFile.program
+                let args = [originalFile, conflictFile]
+                let process = (proc program args){std_in = Inherit, std_out = CreatePipe, std_err = CreatePipe}
+                (exitCode, out, err) <-
+                  liftIO . withCreateProcess process $ \_mStdin mStdout mStderr processHandle ->
+                    case (mStdout, mStderr) of
+                      (Just hStdout, Just hStderr) -> do
+                        out <- hGetContents hStdout
+                        err <- hGetContents hStderr
 
-                      outVar <- newEmptyMVar
-                      _ <- forkIO $ do
-                        evaluate $ rnf out
-                        putMVar outVar out
-                        hClose hStdout
+                        outVar <- newEmptyMVar
+                        _ <- forkIO $ do
+                          evaluate $ rnf out
+                          putMVar outVar out
+                          hClose hStdout
 
-                      errVar <- newEmptyMVar
-                      _ <- forkIO $ do
-                        evaluate $ rnf err
-                        putMVar errVar err
-                        hClose hStderr
+                        errVar <- newEmptyMVar
+                        _ <- forkIO $ do
+                          evaluate $ rnf err
+                          putMVar errVar err
+                          hClose hStderr
 
-                      (,,)
-                        <$> waitForProcess processHandle
-                        <*> takeMVar outVar
-                        <*> takeMVar errVar
-                    (Nothing, _) -> error "missing handle for stdout"
-                    (_, Nothing) -> error "missing handle for stderr"
-              case exitCode of
-                ExitSuccess -> do
-                  logInfo $ "merged " ++ originalFile ++ " into " ++ conflictFile
-                  tell State{syncthingLatestId = Max event.id}
-                ExitFailure code -> do
-                  logError . unlines $
-                    [ "failed to merge " ++ conflictFile ++ " into " ++ originalFile
-                    , "  program: " ++ show program
-                    , "  arguments: " ++ show args
-                    , "  exit status: " ++ show code
-                    , "  stdout:"
-                    ]
-                      ++ fmap ("    " ++) (lines out)
-                      ++ ["  stderr:"]
-                      ++ fmap ("    " ++) (lines err)
-            else do
-              logInfo $ conflictFile ++ " is missing (assuming already merged)"
-              tell State{syncthingLatestId = Max event.id}
-  | otherwise =
+                        (,,)
+                          <$> waitForProcess processHandle
+                          <*> takeMVar outVar
+                          <*> takeMVar errVar
+                      (Nothing, _) -> error "missing handle for stdout"
+                      (_, Nothing) -> error "missing handle for stderr"
+
+                case exitCode of
+                  ExitSuccess -> do
+                    logInfo . unlines $
+                      [ "merged " ++ conflictFile ++ " into " ++ originalFile
+                      , "  program: " ++ show program
+                      , "  arguments: " ++ show args
+                      , "  stdout:"
+                      ]
+                        ++ fmap ("    " ++) (lines out)
+                        ++ ["  stderr:"]
+                        ++ fmap ("    " ++) (lines err)
+                    tell State{syncthingLatestId = Max event.id}
+                  ExitFailure code -> do
+                    logError . unlines $
+                      [ "failed to merge " ++ conflictFile ++ " into " ++ originalFile
+                      , "  program: " ++ show program
+                      , "  arguments: " ++ show args
+                      , "  exit status: " ++ show code
+                      , "  stdout:"
+                      ]
+                        ++ fmap ("    " ++) (lines out)
+                        ++ ["  stderr:"]
+                        ++ fmap ("    " ++) (lines err)
+              else do
+                logInfo $ conflictFile ++ " is missing (assuming already merged)"
+                tell State{syncthingLatestId = Max event.id}
+  | otherwise = do
+      logInfo $ "skipping event with folder " ++ Text.unpack event.payload.folder
       tell State{syncthingLatestId = Max event.id}
 
 data HttpResult a
@@ -319,16 +385,33 @@ getJson manager key url = do
             Right a ->
               pure $ Success a
 
+newtype Cli
+  = Cli
+  { configPath :: FilePath
+  }
+
+cliParser :: Options.Parser Cli
+cliParser =
+  Cli
+    <$> Options.strOption
+      (Options.long "config" <> Options.metavar "PATH" <> Options.help "Path to program settings")
+
 main :: IO ()
 main = do
-  config <- loadConfig
+  hSetBuffering stdout LineBuffering
+  hSetBuffering stderr LineBuffering
+
+  cli <- Options.execParser $ Options.info cliParser Options.fullDesc
+  config <- loadConfig cli.configPath
+  syncthingApiKey <-
+    Secret.protect . ByteString.Char8.strip <$> ByteString.readFile config.syncthingApiKeyFile
 
   manager <- Http.newManager Http.defaultManagerSettings
 
   paths <- do
     let url = Text.unpack config.syncthingUrl ++ "/rest/system/paths"
     result <-
-      getJson @SyncthingPaths manager config.syncthingApiKey url
+      getJson @SyncthingPaths manager (Secret.leak syncthingApiKey) url
     case result of
       Failure err -> do
         logError err
@@ -341,7 +424,13 @@ main = do
 
   let syncthingRoot = paths.baseDir_userHome
 
-  logInfo "started"
+  logInfo . unlines $
+    "watching:" :
+    fmap
+      ("  " ++)
+      [ Text.unpack syncthingRoot </> Text.unpack mergeTarget.folderName </> Text.unpack file.name
+      | mergeTarget <- config.mergeTargets, file <- mergeTarget.files
+      ]
   result <-
     looping initialState $ \continue break state -> do
       let url =
@@ -349,7 +438,7 @@ main = do
               ++ "/rest/events?since="
               ++ show @Int (getMax state.syncthingLatestId)
               ++ "&events=LocalIndexUpdated"
-      result <- getJson @[SyncthingEvent LocalIndexUpdated] manager config.syncthingApiKey url
+      result <- getJson @[SyncthingEvent LocalIndexUpdated] manager (Secret.leak syncthingApiKey) url
       case result of
         Failure err -> do
           logError err

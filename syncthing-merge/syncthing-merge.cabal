@@ -1,6 +1,6 @@
 cabal-version:      3.0
 name:               syncthing-merge
-version:            0.1.0.0
+version:            0.1
 license:            GPL-3.0-only
 license-file:       LICENSE
 author:             Isaac Elliott
@@ -15,17 +15,25 @@ common warnings
 executable syncthing-merge
     import:           warnings
     main-is:          Main.hs
+    other-modules:
+        Secret
+        Toml
     build-depends:
         aeson,
         base ^>=4.19.2.0,
         bytestring,
+        containers,
         deepseq,
+        diagnostica,
+        diagnostica-sage,
         directory,
         filepath,
         http-client,
         http-types,
         mtl,
+        optparse-applicative,
         process,
+        sage,
         text,
         time
     hs-source-dirs:   app

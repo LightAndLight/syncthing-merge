@@ -4,18 +4,26 @@
 
 ## Usage
 
-Run with the following environment variables set:
+`syncthing-merge --config PATH`
 
-| Name | Description |
-| --- | --- |
-| `SYNCTHING_MERGE_URL` | The URL at which Syncthing is accessible |
-| `SYNCTHING_MERGE_API_KEY` | The Syncthing instance's API key |
-| `SYNCTHING_MERGE_FOLDER_ID` | ID of the Syncthing folder to monitor |
-| `SYNCTHING_MERGE_FOLDER_NAME` | Name of the Syncthing folder to monitor |
-| `SYNCTHING_MERGE_FILE_NAME` | Name of the Syncthing file to monitor |
-| [`SYNCTHING_MERGE_PROGRAM`](#syncthing-merge-program) | Path to the program that should perform the merges |
+## Config
 
-### `SYNCTHING_MERGE_PROGRAM`
+```toml
+syncthing-url = "" # URL at which Syncthing is accessible
+syncthing-api-key-file = "" # Path to file containing Syncthing API key
+
+# Each `merge-target` is a folder that contains mergeable files
+[[merge-target]]
+folder-id = "" # Syncthing ID of the folder
+folder-name = "" # Folder name
+
+# Each `merge-target.file` is a file (within the most recently defined `merge-target`) whose conflicting versions can be merged
+[[merge-target.file]]
+name = "" # File name
+program = "" # Program that merges conflicting file versions
+```
+
+### `merge-target[].file[].program`
 
 The program must take two arguments:
 

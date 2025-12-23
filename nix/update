@@ -1,0 +1,4 @@
+#! /usr/bin/env bash
+set -euo pipefail
+
+nix eval -f haskellDeps.nix --json | hdeps -o haskellDeps --cabal-project $PROJECT_ROOT/cabal.project $@

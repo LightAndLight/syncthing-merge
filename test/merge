@@ -1,7 +1,0 @@
-#! /usr/bin/env bash
-set -eu
-
-original="$1"
-conflicting="$2"
-keepassxc-cli merge --same-credentials "$conflicting" "$original"
-mv "$conflicting" "$original"
