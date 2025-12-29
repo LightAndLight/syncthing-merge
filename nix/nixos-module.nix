@@ -35,6 +35,10 @@ in
     services.syncthing-merge = {
       enable = mkEnableOption "syncthing-merge";
       package = mkPackageOption pkgs "syncthing-merge" {};
+      extraGroups = mkOption {
+        description = "List of extra groups the syncthing-merge user should belong to";
+        type = types.listOf types.str;
+      };
       settings = mkOption {
         type = types.submodule {
           options = {
@@ -87,13 +91,19 @@ in
   };
 
   config = mkIf cfg.enable {
+    users.users.syncthing-merge = {
+      isSystemUser = true;
+      group = config.services.syncthing.group;
+      extraGroups = cfg.extraGroups;
+    };
+
     systemd.services.syncthing-merge = {
       description = "syncthing-merge service";
       after = [ "syncthing.service" ];
       wantedBy = [ "multi-user.target" ];
       serviceConfig = {
         Restart = "on-failure";
-        User = config.services.syncthing.user;
+        User = config.users.users.syncthing-merge.name;
         Group = config.services.syncthing.group;
         ExecStart =
           let
